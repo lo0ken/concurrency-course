@@ -4,9 +4,11 @@ import java.util.concurrent.*;
 
 public class Notifier {
 
+    private final ExecutorService executor = Executors.newFixedThreadPool(200);
+
     public void sendOutdatedMessage(Bid bid) {
         CompletableFuture
-                .runAsync(this::imitateSending);
+                .runAsync(this::imitateSending, executor);
     }
 
     private void imitateSending() {
@@ -15,5 +17,7 @@ public class Notifier {
         } catch (InterruptedException e) {}
     }
 
-    public void shutdown() {}
+    public void shutdown() {
+        executor.shutdownNow();
+    }
 }
