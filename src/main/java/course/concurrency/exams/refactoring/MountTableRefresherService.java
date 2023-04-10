@@ -3,12 +3,20 @@ package course.concurrency.exams.refactoring;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.*;
+import java.util.stream.Collectors;
 
 
 public class MountTableRefresherService {
 
+    private static final String ADMIN_ADDRESS = "AdminAddress";
+
     private Others.RouterStore routerStore = new Others.RouterStore();
     private long cacheUpdateTimeout;
+    private Others.MountTableManager manager;
+
+    public MountTableRefresherService(Others.MountTableManager manager) {
+        this.manager = manager;
+    }
 
     /**
      * All router admin clients cached. So no need to create the client again and
@@ -81,7 +89,8 @@ public class MountTableRefresherService {
                 refreshThreads.add(getLocalRefresher(adminAddress));
             } else {
                 refreshThreads.add(new MountTableRefresherThread(
-                            new Others.MountTableManager(adminAddress), adminAddress));
+                    //new Others.MountTableManager(adminAddress), adminAddress));
+                    manager, adminAddress));
             }
         }
         if (!refreshThreads.isEmpty()) {
@@ -90,7 +99,7 @@ public class MountTableRefresherService {
     }
 
     protected MountTableRefresherThread getLocalRefresher(String adminAddress) {
-        return new MountTableRefresherThread(new Others.MountTableManager("local"), adminAddress);
+        return new MountTableRefresherThread(manager, adminAddress);
     }
 
     private void removeFromCache(String adminAddress) {
@@ -98,44 +107,34 @@ public class MountTableRefresherService {
     }
 
     private void invokeRefresh(List<MountTableRefresherThread> refreshThreads) {
-        CountDownLatch countDownLatch = new CountDownLatch(refreshThreads.size());
-        // start all the threads
-        for (MountTableRefresherThread refThread : refreshThreads) {
-            refThread.setCountDownLatch(countDownLatch);
-            refThread.start();
-        }
-        try {
-            /*
-             * Wait for all the thread to complete, await method returns false if
-             * refresh is not finished within specified time
-             */
-            boolean allReqCompleted =
-                    countDownLatch.await(cacheUpdateTimeout, TimeUnit.MILLISECONDS);
-            if (!allReqCompleted) {
-                log("Not all router admins updated their cache");
-            }
-        } catch (InterruptedException e) {
-            log("Mount table cache refresher was interrupted.");
-        }
-        logResult(refreshThreads);
+        List<CompletableFuture<Boolean>> futures = refreshThreads.stream()
+                .map(thread -> CompletableFuture.supplyAsync(() ->
+                                manager.refresh()
+                        ).orTimeout(cacheUpdateTimeout, TimeUnit.MILLISECONDS)
+                        .exceptionally(t -> {
+                            if (t instanceof TimeoutException) {
+                                log("Not all router admins updated their cache");
+                            }
+                            if (t instanceof InterruptedException) {
+                                log("Mount table cache refresher was interrupted.");
+                            }
+                            return false;
+                        }))
+                .collect(Collectors.toList());
+
+        logResult(futures);
     }
 
     private boolean isLocalAdmin(String adminAddress) {
         return adminAddress.contains("local");
     }
 
-    private void logResult(List<MountTableRefresherThread> refreshThreads) {
-        int successCount = 0;
-        int failureCount = 0;
-        for (MountTableRefresherThread mountTableRefreshThread : refreshThreads) {
-            if (mountTableRefreshThread.isSuccess()) {
-                successCount++;
-            } else {
-                failureCount++;
-                // remove RouterClient from cache so that new client is created
-                removeFromCache(mountTableRefreshThread.getAdminAddress());
-            }
-        }
+    private void logResult(List<CompletableFuture<Boolean>> futures) {
+        long successCount = futures.stream().filter(CompletableFuture::join).count();
+        long failureCount = futures.stream()
+                .filter(f -> !f.join())
+                .peek(f -> removeFromCache(ADMIN_ADDRESS))
+                .count();
         log(String.format(
                 "Mount table entries cache refresh successCount=%d,failureCount=%d",
                 successCount, failureCount));
